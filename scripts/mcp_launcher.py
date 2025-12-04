@@ -86,16 +86,75 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
         proxy_exit_code = 1
 
     finally:
-        # 3. Clean Up (Graceful Shutdown)
+        # 3. Clean Up (Guaranteed Network Port Kill)
         if server_process and server_process.poll() is None:
-            print(
-                f"Proxy finished. Shutting down FastAPI server (PID {server_process.pid})..."
-            )
+            print("Proxy finished. Starting network port cleanup...")
+
             try:
-                os.killpg(os.getpgid(server_process.pid), signal.SIGTERM)
-                server_process.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
+                # 1. Look up the PID bound to the server port (8000)
+                # Use fuser to find the PID holding the port, or use lsof as a fallback
+
+                # fuser (usually faster and cleaner output)
+                fuser_output = (
+                    subprocess.check_output(
+                        ["fuser", f"{SERVER_PORT}/tcp"], stderr=subprocess.PIPE
+                    )
+                    .decode()
+                    .strip()
+                )
+
+                # Extract all PIDs (fuser output is just a list of PIDs)
+                pids_to_kill = fuser_output.split()
+
+                if not pids_to_kill:
+                    # Fallback for systems without fuser or where fuser fails
+                    lsof_output = (
+                        subprocess.check_output(
+                            ["lsof", "-ti", f"tcp:{SERVER_PORT}"],
+                            stderr=subprocess.PIPE,
+                        )
+                        .decode()
+                        .strip()
+                    )
+                    pids_to_kill = lsof_output.split()
+
+                if pids_to_kill:
+                    print(
+                        f"Found server PIDs on port {SERVER_PORT}: {', '.join(pids_to_kill)}. Terminating..."
+                    )
+
+                    # 2. Kill all identified PIDs using SIGKILL (most reliable)
+                    for pid in pids_to_kill:
+                        try:
+                            # Use SIGTERM first for grace
+                            os.kill(int(pid), signal.SIGTERM)
+                        except ProcessLookupError:
+                            continue
+
+                    # Wait briefly then force kill any survivors
+                    time.sleep(1)
+
+                    for pid in pids_to_kill:
+                        try:
+                            os.kill(int(pid), signal.SIGKILL)
+                            print(f"PID {pid} terminated.")
+                        except ProcessLookupError:
+                            continue  # Process already gone
+
+                else:
+                    print(f"No process found listening on port {SERVER_PORT}.")
+
+            except FileNotFoundError:
+                # This happens if 'fuser' or 'lsof' is not in the path (e.g., restricted env)
+                print(
+                    "FATAL: Cannot find 'fuser' or 'lsof'. Process cleanup failed.",
+                    file=sys.stderr,
+                )
+            except subprocess.CalledProcessError:
+                # This usually means fuser/lsof ran but found nothing, which is fine.
                 pass
+            except Exception as e:
+                print(f"An error occurred during port cleanup: {e}", file=sys.stderr)
 
     print(f"Shutdown complete. Final Exit Code: {proxy_exit_code}")
     sys.exit(proxy_exit_code)
