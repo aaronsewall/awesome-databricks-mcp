@@ -56,15 +56,23 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
         # 2. Run the dba-mcp-proxy (Layer 2 - The blocking client call)
         print("Executing the dba-mcp-proxy...")
 
-        os.environ["DATABRICKS_APP_URL"] = SERVER_URL
+        # --- FIX STARTS HERE ---
 
-        # We call dba-mcp-proxy directly. Since uvx installs the package,
-        # the entrypoint/console script 'dba-mcp-proxy' should be available
-        # in the isolated environment's PATH.
+        # 1. Start with the command itself and the arguments passed by the user/client
         proxy_cmd = ["dba-mcp-proxy"] + (proxy_args or [])
 
+        # 2. Explicitly ADD the required --databricks-app-url argument here.
+        proxy_cmd.extend(["--databricks-app-url", SERVER_URL])
+
+        # 3. Print the command being run for debugging (optional but helpful)
+        print(f"Proxy Command: {' '.join(proxy_cmd)}")
+
+        # --- FIX ENDS HERE ---
+
+        # Execute the proxy; this will block until the client (e.g., Claude) is done
         proxy_result = subprocess.run(
             proxy_cmd,
+            # Pass Standard I/O streams directly to the proxy
             stdin=sys.stdin,
             stdout=sys.stdout,
             stderr=sys.stderr,
