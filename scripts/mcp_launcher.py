@@ -9,6 +9,8 @@ from typing import List
 SERVER_HOST = "127.0.0.1"
 SERVER_PORT = 8000
 SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
+LOG_FILE_PATH = "uvicorn_mcp_server.log"
+# This file will be created in the directory where uvx runs the script.
 
 
 def launch_server_and_proxy(proxy_args: List[str] = None):
@@ -26,6 +28,11 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
         # 1. Start the Uvicorn/FastAPI server (Layer 1)
         # We use the Python executable from the uvx environment (sys.executable)
         # and run Uvicorn as a module (-m uvicorn) to guarantee it's available.
+        # 1. Start the Uvicorn/FastAPI server (Layer 1)
+        print(f"Uvicorn logs redirected to: {LOG_FILE_PATH}")
+
+        # Open the log file for writing (will be closed in the finally block)
+        log_file = open(LOG_FILE_PATH, "w")
         server_process = subprocess.Popen(
             [
                 sys.executable,
@@ -37,8 +44,8 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
                 "--port",
                 str(SERVER_PORT),
             ],
-            # stdout=subprocess.PIPE,
-            # stderr=subprocess.STDOUT,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
             preexec_fn=os.setsid,
         )
 
@@ -86,75 +93,40 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
         proxy_exit_code = 1
 
     finally:
-        # 3. Clean Up (Guaranteed Network Port Kill)
+        # 3. Clean Up (Robust PGID-based Shutdown)
+
+        # Close the log file handle first
+        if "log_file" in locals() and not log_file.closed:
+            log_file.close()
+
         if server_process and server_process.poll() is None:
-            print("Proxy finished. Starting network port cleanup...")
+            print(
+                f"Proxy finished. Attempting shutdown of FastAPI server (PID {server_process.pid})..."
+            )
 
             try:
-                # 1. Look up the PID bound to the server port (8000)
-                # Use fuser to find the PID holding the port, or use lsof as a fallback
+                pgid = os.getpgid(server_process.pid)
 
-                # fuser (usually faster and cleaner output)
-                fuser_output = (
-                    subprocess.check_output(
-                        ["fuser", f"{SERVER_PORT}/tcp"], stderr=subprocess.PIPE
-                    )
-                    .decode()
-                    .strip()
-                )
+                # 1. Send SIGTERM (Graceful Kill) to the entire process group
+                os.killpg(pgid, signal.SIGTERM)
 
-                # Extract all PIDs (fuser output is just a list of PIDs)
-                pids_to_kill = fuser_output.split()
+                # Wait briefly
+                time.sleep(1)
 
-                if not pids_to_kill:
-                    # Fallback for systems without fuser or where fuser fails
-                    lsof_output = (
-                        subprocess.check_output(
-                            ["lsof", "-ti", f"tcp:{SERVER_PORT}"],
-                            stderr=subprocess.PIPE,
-                        )
-                        .decode()
-                        .strip()
-                    )
-                    pids_to_kill = lsof_output.split()
-
-                if pids_to_kill:
-                    print(
-                        f"Found server PIDs on port {SERVER_PORT}: {', '.join(pids_to_kill)}. Terminating..."
-                    )
-
-                    # 2. Kill all identified PIDs using SIGKILL (most reliable)
-                    for pid in pids_to_kill:
-                        try:
-                            # Use SIGTERM first for grace
-                            os.kill(int(pid), signal.SIGTERM)
-                        except ProcessLookupError:
-                            continue
-
-                    # Wait briefly then force kill any survivors
-                    time.sleep(1)
-
-                    for pid in pids_to_kill:
-                        try:
-                            os.kill(int(pid), signal.SIGKILL)
-                            print(f"PID {pid} terminated.")
-                        except ProcessLookupError:
-                            continue  # Process already gone
-
+                # 2. Check if the process is still alive and use SIGKILL if necessary
+                if server_process.poll() is None:
+                    print(f"Graceful shutdown failed. Forcing kill on PGID {pgid}...")
+                    os.killpg(pgid, signal.SIGKILL)
+                    server_process.wait(timeout=1)
                 else:
-                    print(f"No process found listening on port {SERVER_PORT}.")
+                    print("Shutdown successful.")
 
-            except FileNotFoundError:
-                # This happens if 'fuser' or 'lsof' is not in the path (e.g., restricted env)
-                print(
-                    "FATAL: Cannot find 'fuser' or 'lsof'. Process cleanup failed.",
-                    file=sys.stderr,
-                )
-            except subprocess.CalledProcessError:
-                # This usually means fuser/lsof ran but found nothing, which is fine.
+            except ProcessLookupError:
+                # Process already died, which is the desired outcome
                 pass
             except Exception as e:
-                print(f"An error occurred during port cleanup: {e}", file=sys.stderr)
+                # Catch any unexpected errors during cleanup
+                print(f"Error during server cleanup: {e}", file=sys.stderr)
 
     print(f"Shutdown complete. Final Exit Code: {proxy_exit_code}")
     sys.exit(proxy_exit_code)
