@@ -35,9 +35,9 @@ first_time_setup() {
     
     echo "Creating virtual environment..." >&2
     uv venv
-    
     echo "Installing dependencies..." >&2
-    uv pip install -r requirements.txt
+    export WHENEVER_NO_BUILD_RUST_EXT=1
+    uv sync
     
     echo "Setup complete." >&2
 }
@@ -58,7 +58,7 @@ run_existing() {
         git pull
         ensure_uv
         # Sync dependencies in case they've changed
-        uv pip sync requirements.txt --python "${INSTALL_DIR}/.venv/bin/python"
+        uv sync
     fi
 
     echo "Starting MCP server..." >&2
