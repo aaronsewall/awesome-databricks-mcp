@@ -130,19 +130,15 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
         # 3. Print the command being run for debugging (optional but helpful)
         print(f"Proxy Command: {' '.join(proxy_cmd)}")
 
-        # --- FIX ENDS HERE ---
-
-        # Execute the proxy; this will block until the client (e.g., Claude) is done
-        proxy_result = subprocess.run(
+        PROXY_PROCESS = subprocess.Popen(
             proxy_cmd,
-            # Pass Standard I/O streams directly to the proxy
             stdin=sys.stdin,
             stdout=sys.stdout,
             stderr=sys.stderr,
-            check=False,
         )
 
-        proxy_exit_code = proxy_result.returncode
+        # Block and wait for the proxy to finish (client closes connection or sends signal)
+        proxy_exit_code = PROXY_PROCESS.wait()
 
     except SystemExit as e:
         # Catch the exit from the signal handler and honor it
