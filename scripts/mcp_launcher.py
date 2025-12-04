@@ -113,7 +113,7 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
                 f"Server failed to start. Exit code: {SERVER_PROCESS.returncode}. Output:\n{error_output}"
             )
 
-        print(f"FastAPI server started with PID {server_process.pid}.")
+        print(f"FastAPI server started with PID {SERVER_PROCESS.pid}.")
 
         # 2. Run the dba-mcp-proxy (Layer 2 - The blocking client call)
         print("Executing the dba-mcp-proxy...")
