@@ -37,8 +37,8 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
                 "--port",
                 str(SERVER_PORT),
             ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            # stdout=subprocess.PIPE,
+            # stderr=subprocess.STDOUT,
             preexec_fn=os.setsid,
         )
 
