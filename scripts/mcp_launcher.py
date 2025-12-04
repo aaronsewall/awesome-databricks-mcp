@@ -3,26 +3,41 @@ import os
 import sys
 import time
 import signal
+import socket
 from typing import List
 
 # --- Configuration ---
 SERVER_HOST = "127.0.0.1"
-SERVER_PORT = 8000
-SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
-LOG_FILE_PATH = "uvicorn_mcp_server.log"
+# Using dynamic port allocation, so these are no longer constants.
+# SERVER_PORT = 8000
+# SERVER_URL = f"http://{SERVER_HOST}:{SERVER_PORT}"
+# Using a unique log file per process to support concurrency.
+LOG_FILE_PATH_TEMPLATE = "uvicorn_mcp_server_{pid}.log"
 # This file will be created in the directory where uvx runs the script.
 
 # Global variable to store the server process and its PID for signal handling
 SERVER_PROCESS = None
 LOG_FILE = None
+LOG_FILE_PATH = None
+
+
+def find_free_port():
+    """Finds and returns an available TCP port on the host."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((SERVER_HOST, 0))
+        return s.getsockname()[1]
 
 
 def cleanup_server():
     """Performs the robust process group cleanup."""
-    global SERVER_PROCESS, LOG_FILE
+    global SERVER_PROCESS, LOG_FILE, LOG_FILE_PATH
 
     if LOG_FILE and not LOG_FILE.closed:
         LOG_FILE.close()
+        # Optionally, you might want to remove the log file upon cleanup.
+        # However, it can be useful for debugging, so we'll leave it.
+        # if LOG_FILE_PATH and os.path.exists(LOG_FILE_PATH):
+        #     os.remove(LOG_FILE_PATH)
 
     if SERVER_PROCESS and SERVER_PROCESS.poll() is None:
         print(
@@ -51,7 +66,7 @@ def cleanup_server():
                 print("Shutdown successful.", file=sys.stderr)
 
         except ProcessLookupError:
-            pass
+            pass  # Process already terminated
         except Exception as e:
             print(f"Error during server cleanup: {e}", file=sys.stderr)
 
@@ -65,14 +80,19 @@ def signal_handler(sig, frame):
 
 def launch_server_and_proxy(proxy_args: List[str] = None):
     """
-    Starts the FastAPI server, runs the proxy, and ensures server shutdown.
+    Starts the FastAPI server on a dynamic port, runs the proxy, and ensures server shutdown.
     It uses sys.executable to ensure both Uvicorn and the dba-mcp-proxy
     are run within the temporary, isolated environment created by uvx.
     """
-    global SERVER_PROCESS, LOG_FILE
+    global SERVER_PROCESS, LOG_FILE, LOG_FILE_PATH
     proxy_exit_code = 1
 
-    print(f"Starting FastAPI MCP server in background on {SERVER_URL}...")
+    # --- Dynamic Port and Log File Allocation ---
+    server_port = find_free_port()
+    server_url = f"http://{SERVER_HOST}:{server_port}"
+    LOG_FILE_PATH = LOG_FILE_PATH_TEMPLATE.format(pid=os.getpid())
+
+    print(f"Starting FastAPI MCP server in background on {server_url}...")
     # 1. Register signal handlers immediately
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
@@ -83,10 +103,6 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
         # 1. Start the Uvicorn/FastAPI server (Layer 1)
         # We use the Python executable from the uvx environment (sys.executable)
         # and run Uvicorn as a module (-m uvicorn) to guarantee it's available.
-        # 1. Start the Uvicorn/FastAPI server (Layer 1)
-        print(f"Uvicorn logs redirected to: {LOG_FILE_PATH}")
-
-        # Open the log file for writing (will be closed in the finally block)
         LOG_FILE = open(LOG_FILE_PATH, "w")
         SERVER_PROCESS = subprocess.Popen(
             [
@@ -97,37 +113,34 @@ def launch_server_and_proxy(proxy_args: List[str] = None):
                 "--host",
                 SERVER_HOST,
                 "--port",
-                str(SERVER_PORT),
+                str(server_port),
             ],
             stdout=LOG_FILE,
             stderr=subprocess.STDOUT,
             preexec_fn=os.setsid,
         )
 
-        time.sleep(2)
+        time.sleep(2)  # Give the server a moment to start
 
         if SERVER_PROCESS.poll() is not None:
-            # Try to read output to diagnose failure
-            error_output = SERVER_PROCESS.communicate()[0].decode()
+            # Try to read output to diagnose failure. Close the file first.
+            LOG_FILE.close()
+            with open(LOG_FILE_PATH, "r") as f:
+                error_output = f.read()
             raise RuntimeError(
-                f"Server failed to start. Exit code: {SERVER_PROCESS.returncode}. Output:\n{error_output}"
+                f"Server failed to start. Exit code: {SERVER_PROCESS.returncode}. Output from {LOG_FILE_PATH}:\n{error_output}"
             )
 
         print(f"FastAPI server started with PID {SERVER_PROCESS.pid}.")
 
         # 2. Run the dba-mcp-proxy (Layer 2 - The blocking client call)
         print("Executing the dba-mcp-proxy...")
-        os.environ["DATABRICKS_APP_URL"] = SERVER_URL
+        os.environ["DATABRICKS_APP_URL"] = server_url
 
-        # --- FIX STARTS HERE ---
-
-        # 1. Start with the command itself and the arguments passed by the user/client
+        # --- Dynamic URL for Proxy ---
         proxy_cmd = ["dba-mcp-proxy"] + (proxy_args or [])
+        proxy_cmd.extend(["--databricks-app-url", server_url])
 
-        # 2. Explicitly ADD the required --databricks-app-url argument here.
-        proxy_cmd.extend(["--databricks-app-url", SERVER_URL])
-
-        # 3. Print the command being run for debugging (optional but helpful)
         print(f"Proxy Command: {' '.join(proxy_cmd)}")
 
         PROXY_PROCESS = subprocess.Popen(
